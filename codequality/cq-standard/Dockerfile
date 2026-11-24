@@ -74,7 +74,11 @@ BASH
 
 # Skipfiles are first-match-wins, so the platform prologue is prepended and
 # wins over anything the repo says.
-RUN <<'BASH'
+#
+# ssh: PREPARE may fetch a dependency the repo does not vendor, and the
+# baseline's prepare already runs with the agent mounted - without it here the
+# same hook authenticates for one ref and not the other.
+RUN --mount=type=ssh <<'BASH'
 set -eux
 mkdir -p "$QC"
 cat /etc/cq/skipfile-prologue.txt > /etc/cq/skipfile.txt
