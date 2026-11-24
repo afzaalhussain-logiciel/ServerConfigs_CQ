@@ -1,0 +1,79 @@
+# Standard code-quality environment.
+#
+#   docker build -f Dockerfile.base -t cq-std-env:1.0.0 .
+#
+# Two layers with different owners:
+#
+#   1. BUILD DEPENDENCIES - what the repos need to compile. Team-owned. In a
+#      real rollout each product team publishes its own base image with these,
+#      and the CQ tools below are grafted on with COPY --from. For this
+#      experiment both repos' dependencies are small enough to share one image.
+#
+#   2. CQ TOOLS - the analysis toolchain. Platform-owned, identical everywhere.
+#      This is the layer that must never differ between repos: the whole point
+#      is that two repos cannot disagree about what "analysed" means.
+
+FROM almalinux:9.6
+
+# Pin the repos to one mirror instead of the mirrorlist. The host resolver is
+# configured "timeout:1 attempts:1", so a single dropped DNS packet fails a
+# lookup outright; dnf's parallel downloads hit that repeatedly, walk the whole
+# mirror list and abort the layer with "No more mirrors to try".
+RUN sed -i -e 's|^mirrorlist=|#mirrorlist=|' \
+           -e 's|^#[[:space:]]*baseurl=https://repo\.almalinux\.org|baseurl=http://mum.aws.repo.almalinux.org|' \
+           /etc/yum.repos.d/almalinux*.repo && \
+    printf 'retries=10\ntimeout=60\n' >> /etc/dnf/dnf.conf && \
+    dnf -y install epel-release dnf-plugins-core && \
+    dnf config-manager --set-enabled crb && \
+    dnf -y groupinstall "Development Tools" && \
+    dnf -y install \
+        cmake git openssh-clients ca-certificates which file \
+        python3 python3-pip && \
+    dnf clean all
+
+# ---- 1. build dependencies (team-owned in a real rollout) ------------------
+# vantage: libcurl (required), zlib, zstd, and Python for codegen.
+# MuxerXpress: gtest/gmock - its tests are built only `if(GTest_FOUND)`, so
+# without these the suite silently disappears and the run reports zero tests.
+RUN dnf -y install \
+        libcurl-devel zlib-devel libzstd-devel \
+        gtest-devel gmock-devel && \
+    dnf clean all
+
+# ---- 2. CQ tools (platform-owned, identical for every repo) ----------------
+# clang-tidy ships in clang-tools-extra; setarch comes from util-linux (TSan
+# needs ASLR off). libasan/libubsan/libtsan are separate RPMs; without them the
+# sanitizer builds fail at link rather than at configure.
+RUN dnf -y install \
+        clang clang-tools-extra cppcheck util-linux lcov \
+        libasan libubsan libtsan && \
+    dnf clean all && \
+    python3 -m venv /opt/codequality-env && \
+    /opt/codequality-env/bin/pip install --no-cache-dir --upgrade pip && \
+    # pip's own retries all fire within seconds, so a DNS outage lasting half a
+    # minute exhausts them and fails the layer. The sleep is what covers it.
+    for attempt in 1 2 3 4 5; do \
+        /opt/codequality-env/bin/pip install --no-cache-dir \
+            --retries 20 --timeout 60 \
+            codechecker diff-cover gcovr && break; \
+        echo "pip attempt ${attempt} failed; retrying in 20s"; sleep 20; \
+    done; \
+    # A for-loop always exits 0, so the layer must assert what it installed.
+    /opt/codequality-env/bin/CodeChecker version >/dev/null && \
+    /opt/codequality-env/bin/gcovr --version >/dev/null && \
+    /opt/codequality-env/bin/diff-cover --version >/dev/null
+
+ENV PATH="/opt/codequality-env/bin:${PATH}"
+
+# Fail here rather than three stages into a pipeline run.
+RUN ldconfig && \
+    test -f /usr/include/curl/curl.h && \
+    test -f /usr/include/zlib.h && \
+    test -f /usr/include/zstd.h && \
+    test -f /usr/include/gtest/gtest.h && \
+    command -v CodeChecker report-converter gcovr diff-cover cppcheck clang-tidy setarch cmake git > /dev/null && \
+    echo 'int main(){return 0;}' > /tmp/p.cpp && \
+    for s in address undefined thread; do \
+        g++ -fsanitize=$s -o /tmp/p /tmp/p.cpp || { echo "sanitizer $s unusable" >&2; exit 1; }; \
+    done && rm -f /tmp/p /tmp/p.cpp && \
+    echo "cq-std-env verified"
