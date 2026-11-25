@@ -32,7 +32,7 @@ ARG PROFILE=cpp-cmake
 ARG MAX_NEW_HIGH=0
 ARG MIN_DIFF_COV=0
 
-ENV SRC=/src QC=/qc-out \
+ENV SRC=/src QC=/qc-out BASE_SRC=/src-baseline \
     TARGET_REF=${TARGET_REF} BASELINE_REF=${BASELINE_REF} NEED_BASELINE=${NEED_BASELINE} \
     JOBS=${JOBS} ANALYZERS=${ANALYZERS} \
     CONFIGURE_FLAGS=${CONFIGURE_FLAGS} SANITIZER_FLAGS=${SANITIZER_FLAGS} \
@@ -45,6 +45,7 @@ COPY tsan.sh    /etc/cq/tsan.sh
 COPY analyze.sh /etc/cq/analyze.sh
 COPY skipfile-prologue.txt     /etc/cq/skipfile-prologue.txt
 COPY skipfile-default-tail.txt /etc/cq/skipfile-default-tail.txt
+COPY anchor-skipfile.awk       /etc/cq/anchor-skipfile.awk
 COPY mk-newcode-cobertura.py   /etc/cq/mk-newcode-cobertura.py
 
 RUN --mount=type=ssh <<'BASH'
@@ -81,15 +82,23 @@ BASH
 RUN --mount=type=ssh <<'BASH'
 set -eux
 mkdir -p "$QC"
-cat /etc/cq/skipfile-prologue.txt > /etc/cq/skipfile.txt
+cat /etc/cq/skipfile-prologue.txt > /etc/cq/skipfile-raw.txt
 if [ -n "${SKIPFILE:-}" ] && [ -f "$SRC/$SKIPFILE" ]; then
     echo "[cq] skipfile: $SKIPFILE (repo) + platform prologue"
-    cat "$SRC/$SKIPFILE" >> /etc/cq/skipfile.txt
+    cat "$SRC/$SKIPFILE" >> /etc/cq/skipfile-raw.txt
 else
     echo "[cq] skipfile: platform default (repo ships none)"
-    cat /etc/cq/skipfile-default-tail.txt >> /etc/cq/skipfile.txt
+    cat /etc/cq/skipfile-default-tail.txt >> /etc/cq/skipfile-raw.txt
 fi
-cp /etc/cq/skipfile.txt "$QC/skipfile-effective.txt"
+# A skipfile names repo directories, but CodeChecker matches absolute paths and
+# the two refs sit at different roots - so each gets its own anchored copy.
+awk -v root="$SRC"      -f /etc/cq/anchor-skipfile.awk /etc/cq/skipfile-raw.txt \
+    > /etc/cq/skipfile-target.txt
+awk -v root="$BASE_SRC" -f /etc/cq/anchor-skipfile.awk /etc/cq/skipfile-raw.txt \
+    > /etc/cq/skipfile-baseline.txt
+cp /etc/cq/skipfile-raw.txt      "$QC/skipfile-merged.txt"
+cp /etc/cq/skipfile-target.txt   "$QC/skipfile-target.txt"
+cp /etc/cq/skipfile-baseline.txt "$QC/skipfile-baseline.txt"
 cd "$SRC"
 [ -n "${PREPARE:-}" ] && { echo "[cq] prepare: $PREPARE"; eval "$PREPARE"; } || echo "[cq] prepare: (none)"
 BASH

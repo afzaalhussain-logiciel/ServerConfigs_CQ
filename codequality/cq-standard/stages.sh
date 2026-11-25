@@ -18,9 +18,18 @@ SAN_DEBUG='-fno-omit-frame-pointer -g -fno-var-tracking-assignments'
 
 # The baseline needs its own checkout: CodeChecker store hashes the files a
 # report references, so the two refs cannot share one tree. README.md.
-BASE_SRC=/src-baseline
+# The Dockerfile exports it too - the skipfile layer anchors to it without
+# sourcing this file.
+BASE_SRC=${BASE_SRC:-/src-baseline}
 src_dir()     { echo "${CQ_SRC:-$SRC}"; }
 src_dir_for() { [ "$1" = baseline ] && echo "$BASE_SRC" || echo "$SRC"; }
+
+# One anchored skipfile per root: the rules name repo directories, but
+# CodeChecker matches absolute paths. README.md.
+skipfile() {
+    [ "$(src_dir)" = "$BASE_SRC" ] \
+        && echo /etc/cq/skipfile-baseline.txt || echo /etc/cq/skipfile-target.txt
+}
 
 repo_provides_targets() {
     [ "${PROFILE:-cpp-cmake}" = cpp-cmake-targets ] && [ -f "$(src_dir)/cmake/CodeChecker.cmake" ]
@@ -29,7 +38,7 @@ repo_provides_targets() {
 # The output dir is a parameter, not $QC: the repo's cq_* targets bake it in at
 # configure time, so each ref needs its own. README.md.
 repo_target_flags() {     # repo_target_flags <output-dir>
-    echo "-DCQ_OUTPUT_DIR=$1 -DCQ_SKIPFILE=/etc/cq/skipfile.txt" \
+    echo "-DCQ_OUTPUT_DIR=$1 -DCQ_SKIPFILE=$(skipfile)" \
          "-DCQ_CTEST_EXCLUDE=${TEST_EXCLUDE:-} -DCQ_BASELINE_REF=$BASELINE_REF"
 }
 
@@ -97,7 +106,7 @@ cq_analyse_memory() {     # cq_analyse_memory <reports-dir>
     else
         # A sanitized compile DB yields the same findings as a plain one.
         CodeChecker analyze "$b/compile_commands.json" -o "$reports" \
-            --analyzers ${ANALYZERS} --ignore /etc/cq/skipfile.txt \
+            --analyzers ${ANALYZERS} --ignore "$(skipfile)" \
             --clean --no-missing-checker-error || true
 
         require_instrumentation "$b" __asan_ __ubsan_

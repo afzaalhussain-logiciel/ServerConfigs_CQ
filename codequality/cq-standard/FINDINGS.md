@@ -43,6 +43,28 @@ second pass drops no static report (measured 0 on both repos) and every TSan
 one (14 on vantage, 4 on muxer), because TSan attributes a race to the test
 that drives it. `analyze.sh` removes the file before storing.
 
+**A skipfile names repo directories, but CodeChecker matches absolute paths.**
+The target is checked out at `/src` and the baseline at `/src-baseline`, so a
+rule like `+*/src/*` also matches the target's checkout root and pulls in every
+directory under it, while the baseline's root has no `/src/` segment and those
+same files fall through to the closing `-*`. The two refs were analysed with
+different scope, and whatever the repo keeps outside `src/` existed only on the
+target side of the diff and scored as net-new. On FIXHub that was the generated
+`config/FbeProto` code: 0 plists on the baseline against 12 on the target, 3 of
+them HIGH, failing a branch whose own change was clean. Repos whose sources all
+sit under a top-level `src/` were unaffected, because `/src-baseline/src/...`
+still matches - measured 0 files moving on muxer and vantage.
+`anchor-skipfile.awk` rewrites each relative rule against one root, and the
+Dockerfile emits a copy per ref, so both get the scope the rules describe.
+
+Both copies come from the TARGET's skipfile, read before the baseline worktree
+exists. That is deliberate: the gate is a diff, so both sides need one ruler,
+and it is the PR's. A commit that widens scope then re-measures the newly
+included code on both refs and the diff stays honest, where per-ref skipfiles
+would have scored all of it as new and made widening a self-inflicted failure.
+The stored baseline is not re-scoped though, so a PR that materially widens
+scope still needs REFRESH=1 until the skipfile is hashed into that decision.
+
 **TSan's pid must be normalised.** report-converter hashes the report message
 and TSan puts the pid in it, so the same race hashed differently every run and
 every pre-existing race scored net-new forever. `trace_tests.cpp:1854` was
