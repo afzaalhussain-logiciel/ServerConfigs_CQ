@@ -39,7 +39,16 @@ repo_provides_targets() {
 # The output dir is a parameter, not $QC: the repo's cq_* targets bake it in at
 # configure time, so each ref needs its own. README.md.
 repo_target_flags() {     # repo_target_flags <output-dir> <skipfile>
-    echo "-DCQ_OUTPUT_DIR=$1 -DCQ_SKIPFILE=$2" \
+    # CQ_ANALYZERS is forwarded so cq_analyze runs the manifest's set rather
+    # than whatever the repo defaults to - FIXHub's default adds clang-tidy,
+    # which the command route never runs, so the two routes disagreed. Spaces
+    # become ";" because cmake wants a list; the ";" arrives by expansion and
+    # is never re-parsed by the shell.
+    local an=""
+    if [ -n "${ANALYZERS:-}" ]; then
+        an="-DCQ_ANALYZERS=$(printf '%s' "$ANALYZERS" | tr ' ' ';')"
+    fi
+    echo "-DCQ_OUTPUT_DIR=$1 -DCQ_SKIPFILE=$2 $an" \
          "-DCQ_CTEST_EXCLUDE=${TEST_EXCLUDE:-} -DCQ_BASELINE_REF=$BASELINE_REF"
 }
 
