@@ -32,7 +32,7 @@ ARG PROFILE=cpp-cmake
 ARG MAX_NEW_HIGH=0
 ARG MIN_DIFF_COV=0
 
-ENV SRC=/src QC=/qc-out BASE_SRC=/src-baseline \
+ENV SRC=/src QC=/qc-out \
     TARGET_REF=${TARGET_REF} BASELINE_REF=${BASELINE_REF} NEED_BASELINE=${NEED_BASELINE} \
     JOBS=${JOBS} ANALYZERS=${ANALYZERS} \
     CONFIGURE_FLAGS=${CONFIGURE_FLAGS} SANITIZER_FLAGS=${SANITIZER_FLAGS} \
@@ -43,9 +43,7 @@ ENV SRC=/src QC=/qc-out BASE_SRC=/src-baseline \
 COPY stages.sh  /etc/cq/stages.sh
 COPY tsan.sh    /etc/cq/tsan.sh
 COPY analyze.sh /etc/cq/analyze.sh
-COPY skipfile-prologue.txt     /etc/cq/skipfile-prologue.txt
-COPY skipfile-default-tail.txt /etc/cq/skipfile-default-tail.txt
-COPY anchor-skipfile.awk       /etc/cq/anchor-skipfile.awk
+COPY skipfile-default.txt /etc/cq/skipfile-default.txt
 COPY mk-newcode-cobertura.py   /etc/cq/mk-newcode-cobertura.py
 
 RUN --mount=type=ssh <<'BASH'
@@ -73,8 +71,7 @@ git submodule update --init --recursive --depth 1 --jobs 1
 git log -1 --oneline
 BASH
 
-# Skipfiles are first-match-wins, so the platform prologue is prepended and
-# wins over anything the repo says.
+# The repo owns its scope in a single first-match-wins skipfile.
 #
 # ssh: PREPARE may fetch a dependency the repo does not vendor, and the
 # baseline's prepare already runs with the agent mounted - without it here the
@@ -82,23 +79,15 @@ BASH
 RUN --mount=type=ssh <<'BASH'
 set -eux
 mkdir -p "$QC"
-cat /etc/cq/skipfile-prologue.txt > /etc/cq/skipfile-raw.txt
 if [ -n "${SKIPFILE:-}" ] && [ -f "$SRC/$SKIPFILE" ]; then
-    echo "[cq] skipfile: $SKIPFILE (repo) + platform prologue"
-    cat "$SRC/$SKIPFILE" >> /etc/cq/skipfile-raw.txt
+    echo "[cq] skipfile: $SKIPFILE (repo)"
+    cp "$SRC/$SKIPFILE" /etc/cq/skipfile.txt
 else
     echo "[cq] skipfile: platform default (repo ships none)"
-    cat /etc/cq/skipfile-default-tail.txt >> /etc/cq/skipfile-raw.txt
+    cp /etc/cq/skipfile-default.txt /etc/cq/skipfile.txt
 fi
-# A skipfile names repo directories, but CodeChecker matches absolute paths and
-# the two refs sit at different roots - so each gets its own anchored copy.
-awk -v root="$SRC"      -f /etc/cq/anchor-skipfile.awk /etc/cq/skipfile-raw.txt \
-    > /etc/cq/skipfile-target.txt
-awk -v root="$BASE_SRC" -f /etc/cq/anchor-skipfile.awk /etc/cq/skipfile-raw.txt \
-    > /etc/cq/skipfile-baseline.txt
-cp /etc/cq/skipfile-raw.txt      "$QC/skipfile-merged.txt"
-cp /etc/cq/skipfile-target.txt   "$QC/skipfile-target.txt"
-cp /etc/cq/skipfile-baseline.txt "$QC/skipfile-baseline.txt"
+. /etc/cq/stages.sh
+require_absolute_rules /etc/cq/skipfile.txt
 cd "$SRC"
 [ -n "${PREPARE:-}" ] && { echo "[cq] prepare: $PREPARE"; eval "$PREPARE"; } || echo "[cq] prepare: (none)"
 BASH
@@ -108,7 +97,7 @@ BASH
 RUN <<'BASH'
 set -eux
 . /etc/cq/stages.sh
-cq_analyse_memory "$QC/reports"
+cq_analyse_memory "$QC/reports" /etc/cq/skipfile.txt
 BASH
 
 RUN <<'BASH'
@@ -120,7 +109,7 @@ BASH
 RUN <<'BASH'
 set -eux
 . /etc/cq/stages.sh
-cq_build_thread target
+cq_build_thread target /etc/cq/skipfile.txt
 BASH
 
 # Baseline, only when the server has no run for it or a refresh was asked for.
@@ -149,8 +138,20 @@ git submodule update --init --recursive --depth 1 --jobs 1
 echo "[cq] baseline ${BASELINE_REF} at $(git rev-parse --short HEAD) in $BASE_SRC"
 [ -n "${PREPARE:-}" ] && eval "$PREPARE" || true
 export CQ_SRC="$BASE_SRC"
-cq_analyse_memory "$QC/baseline/reports"
-cq_build_thread baseline
+# The baseline's OWN scope, from its own checkout, so a stored baseline run is
+# a function of the baseline ref alone and not of whichever target refreshed
+# it. Rules are written against $SRC, so only the checkout prefix is
+# substituted; a rule outside it ("-/usr/*") and the closing "-*" stay put.
+if [ -n "${SKIPFILE:-}" ] && [ -f "$BASE_SRC/$SKIPFILE" ]; then
+    base_sf="$BASE_SRC/$SKIPFILE"
+else
+    base_sf=/etc/cq/skipfile.txt
+    echo "[cq] baseline ${BASELINE_REF} ships no skipfile - using the target's"
+fi
+require_absolute_rules "$base_sf"
+sed -E "s|^([+-])$SRC/|\1$BASE_SRC/|" "$base_sf" > /etc/cq/skipfile-baseline.txt
+cq_analyse_memory "$QC/baseline/reports" /etc/cq/skipfile-baseline.txt
+cq_build_thread baseline /etc/cq/skipfile-baseline.txt
 BASH
 
 CMD ["bash", "/etc/cq/tsan.sh"]

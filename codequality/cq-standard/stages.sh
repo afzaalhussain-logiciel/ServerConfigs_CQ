@@ -18,17 +18,18 @@ SAN_DEBUG='-fno-omit-frame-pointer -g -fno-var-tracking-assignments'
 
 # The baseline needs its own checkout: CodeChecker store hashes the files a
 # report references, so the two refs cannot share one tree. README.md.
-# The Dockerfile exports it too - the skipfile layer anchors to it without
-# sourcing this file.
-BASE_SRC=${BASE_SRC:-/src-baseline}
+BASE_SRC=/src-baseline
 src_dir()     { echo "${CQ_SRC:-$SRC}"; }
 src_dir_for() { [ "$1" = baseline ] && echo "$BASE_SRC" || echo "$SRC"; }
 
-# One anchored skipfile per root: the rules name repo directories, but
-# CodeChecker matches absolute paths. README.md.
-skipfile() {
-    [ "$(src_dir)" = "$BASE_SRC" ] \
-        && echo /etc/cq/skipfile-baseline.txt || echo /etc/cq/skipfile-target.txt
+# A rule must be an absolute path, or the closing "-*". A relative rule and the
+# old "+*/src/*" form both match nothing once the checkout prefix is
+# substituted: the scope empties, and an empty target scope reports a clean
+# PASS while an empty baseline scope makes every target finding look new.
+require_absolute_rules() {   # require_absolute_rules <skipfile>
+    grep -nvE "^([+-]/|[+-]\*\$|#|[[:space:]]*\$)" "$1" || return 0
+    echo "[cq] $1: the rules above must be absolute paths under $SRC (or '-*')" >&2
+    exit 1
 }
 
 repo_provides_targets() {
@@ -37,8 +38,8 @@ repo_provides_targets() {
 
 # The output dir is a parameter, not $QC: the repo's cq_* targets bake it in at
 # configure time, so each ref needs its own. README.md.
-repo_target_flags() {     # repo_target_flags <output-dir>
-    echo "-DCQ_OUTPUT_DIR=$1 -DCQ_SKIPFILE=$(skipfile)" \
+repo_target_flags() {     # repo_target_flags <output-dir> <skipfile>
+    echo "-DCQ_OUTPUT_DIR=$1 -DCQ_SKIPFILE=$2" \
          "-DCQ_CTEST_EXCLUDE=${TEST_EXCLUDE:-} -DCQ_BASELINE_REF=$BASELINE_REF"
 }
 
@@ -79,15 +80,15 @@ require_instrumentation() {   # require_instrumentation <build-dir> <sym>...
 }
 
 # ---- static analysis + ASan + LSan + UBSan, from one compile ----------------
-cq_analyse_memory() {     # cq_analyse_memory <reports-dir>
-    local reports=$1
+cq_analyse_memory() {     # cq_analyse_memory <reports-dir> <skipfile>
+    local reports=$1 skip=$2
     local src; src="$(src_dir)"
     local b="$src/build" tgt=""
     # /qc-out/reports -> /qc-out ; /qc-out/baseline/reports -> /qc-out/baseline
     local outdir; outdir="$(dirname "$reports")"
     local log="$outdir/san-address+undefined.log"
     mkdir -p "$reports" "$outdir"
-    if repo_provides_targets; then tgt="$(repo_target_flags "$outdir")"; fi
+    if repo_provides_targets; then tgt="$(repo_target_flags "$outdir" "$skip")"; fi
 
     # address+undefined is a supported pair; thread is rejected alongside
     # address, and coverage needs -O0, so those two stay separate.
@@ -106,7 +107,7 @@ cq_analyse_memory() {     # cq_analyse_memory <reports-dir>
     else
         # A sanitized compile DB yields the same findings as a plain one.
         CodeChecker analyze "$b/compile_commands.json" -o "$reports" \
-            --analyzers ${ANALYZERS} --ignore "$(skipfile)" \
+            --analyzers ${ANALYZERS} --ignore "$skip" \
             --clean --no-missing-checker-error || true
 
         require_instrumentation "$b" __asan_ __ubsan_
@@ -130,7 +131,7 @@ cq_measure_coverage() {
     local b="$src/build-cov" tgt=""
     mkdir -p "$QC/coverage"
     if repo_provides_targets; then
-        tgt="$(repo_target_flags "$QC")"
+        tgt="$(repo_target_flags "$QC" /etc/cq/skipfile.txt)"
         # -DCQ_COVERAGE=ON instruments the targets the repo listed, PRIVATE;
         # global coverage flags here would silently widen that scope.
         cmake -S "$src" -B "$b" ${CONFIGURE_FLAGS} ${tgt} -DCQ_COVERAGE=ON -DCMAKE_BUILD_TYPE=Debug
@@ -180,16 +181,16 @@ cq_measure_coverage() {
 }
 
 # ---- TSan: built here, executed later by cq_run_thread ----------------------
-cq_build_thread() {       # cq_build_thread <tag>
+cq_build_thread() {       # cq_build_thread <tag> <skipfile>
     # Separate statements: bash expands every word of `local` before running it,
     # so $tag on the same line would still be unset under set -u.
-    local tag=$1
+    local tag=$1 skip=$2
     local src; src="$(src_dir)"
     local b="$src/build-tsan-$tag" tgt=""
     # Baked in at configure time, so the tag has to pick the directory here.
     local outdir; [ "$tag" = baseline ] && outdir="$QC/baseline" || outdir="$QC"
     mkdir -p "$outdir"
-    if repo_provides_targets; then tgt="$(repo_target_flags "$outdir")"; fi
+    if repo_provides_targets; then tgt="$(repo_target_flags "$outdir" "$skip")"; fi
     cmake -S "$src" -B "$b" ${CONFIGURE_FLAGS} ${SANITIZER_FLAGS} ${tgt} \
           -DCMAKE_BUILD_TYPE=Debug \
           -DCMAKE_CXX_FLAGS="-fsanitize=thread $SAN_DEBUG -O1" \

@@ -43,27 +43,49 @@ second pass drops no static report (measured 0 on both repos) and every TSan
 one (14 on vantage, 4 on muxer), because TSan attributes a race to the test
 that drives it. `analyze.sh` removes the file before storing.
 
-**A skipfile names repo directories, but CodeChecker matches absolute paths.**
-The target is checked out at `/src` and the baseline at `/src-baseline`, so a
-rule like `+*/src/*` also matches the target's checkout root and pulls in every
-directory under it, while the baseline's root has no `/src/` segment and those
-same files fall through to the closing `-*`. The two refs were analysed with
-different scope, and whatever the repo keeps outside `src/` existed only on the
-target side of the diff and scored as net-new. On FIXHub that was the generated
-`config/FbeProto` code: 0 plists on the baseline against 12 on the target, 3 of
-them HIGH, failing a branch whose own change was clean. Repos whose sources all
-sit under a top-level `src/` were unaffected, because `/src-baseline/src/...`
-still matches - measured 0 files moving on muxer and vantage.
-`anchor-skipfile.awk` rewrites each relative rule against one root, and the
-Dockerfile emits a copy per ref, so both get the scope the rules describe.
+**A skipfile rule is a repo path, but CodeChecker matches absolute paths.**
+Scope used to be written in the "+*/src/*" form, which does not mean "my src
+directory" - it means "any path containing /src/". The target is checked out at
+/src and the baseline at /src-baseline, so that rule matched the target's
+checkout root and pulled in every directory under it, while the baseline's root
+has no /src/ segment and those files fell through to the closing "-*". The refs
+were analysed with different scope, and whatever a repo keeps outside src/
+existed only on the target side of the diff and scored as net-new. On FIXHub
+that was the generated config/FbeProto code: 0 baseline plists against 12 on
+the target, 3 of them HIGH, failing a branch whose own change was clean. Repos
+whose sources all sit under a top-level src/ were unaffected, because
+/src-baseline/src/... still matched.
 
-Both copies come from the TARGET's skipfile, read before the baseline worktree
-exists. That is deliberate: the gate is a diff, so both sides need one ruler,
-and it is the PR's. A commit that widens scope then re-measures the newly
-included code on both refs and the diff stays honest, where per-ref skipfiles
-would have scored all of it as new and made widening a self-inflicted failure.
-The stored baseline is not re-scoped though, so a PR that materially widens
-scope still needs REFRESH=1 until the skipfile is hashed into that decision.
+Rules are now written as absolute paths against $SRC - "+/src/src/*",
+"-/src/build*/*" - so the target uses the file as it stands and the baseline
+needs one substitution of the root. A rule outside the checkout ("-/usr/*")
+and the closing "-*" do not start with $SRC and are left alone, which keeps
+external scope external. Being explicit also removed the prologue: a rule that
+names /src/src cannot reach /src/build/src or /src/3rdparty/*/src, so the
+non-overridable excludes for build trees, vendored directories and /usr were
+only ever needed to contain the "*/" form. Measured identical scope on muxer
+(50) and FIXHub (79) with the prologue gone, on both refs, including synthetic
+build-tree, vendor, submodule and nested-test paths.
+
+The cost is that a repo's skipfile names the container's checkout directory, so
+moving $SRC means updating every repo. That is the trade for one substitution
+instead of a rewriter.
+
+Each ref is scoped by its own skipfile, read from its own checkout. The
+alternative - scoping the baseline with the target's rules, so both sides of
+the diff share one ruler - only reaches the baseline on the runs that actually
+re-analyse it, and in steady state NEED_BASELINE is 0 and the comparison uses
+the stored run. That made a stored baseline's scope depend on whichever target
+happened to refresh it. Reading each ref's own file makes it a function of that
+ref alone, so the stored run is reproducible. The consequence to know: a PR
+that widens scope sees the newly included pre-existing code as new until the
+baseline is refreshed.
+
+A relative rule, or the old "+*/src/*" form, matches nothing once the checkout
+prefix is substituted. An empty target scope reports a clean PASS with no
+analysis behind it; an empty baseline scope makes every target finding look
+new. `require_absolute_rules` is applied to both refs' files and fails naming
+the offending lines.
 
 **TSan's pid must be normalised.** report-converter hashes the report message
 and TSan puts the pid in it, so the same race hashed differently every run and

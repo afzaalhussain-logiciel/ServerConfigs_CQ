@@ -1,0 +1,17 @@
+# Fallback scope, used only when a repo ships no skipfile of its own. A repo
+# whose sources live elsewhere should ship one rather than rely on this guess.
+#
+# First match wins. A rule is an absolute path - /src is where the repo is
+# checked out - and "-*" closes the allow-list, so anything not named below is
+# out, system headers included.
+-/src/build*/*
+-/src/tests/*
+-/src/test/*
+-/src/*/tests/*
+
++/src/src/*
++/src/include/*
++/src/daemon/*
++/src/lib/*
+
+-*
